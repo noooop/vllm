@@ -293,6 +293,9 @@ class Sampler(nn.Module):
             modify_greedy_probs=self._should_modify_greedy_probs_inplace,
         )
 
+        if envs.VLLM_CHECK_NAN_RESULTS:
+            assert not torch.isnan(logprobs).any()
+
         if self.include_gpu_probs_tensor:
             # Since we will defer sampler result Pythonization,
             # preserve GPU-side tensors in support of later
