@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import gc
 import math
 import random
 import time
@@ -32,21 +33,19 @@ class BenchmarkConfig(TypedDict):
     num_stages: int
 
 
-def benchmark_config(
-    config: BenchmarkConfig,
-    num_tokens: int,
-    num_experts: int,
-    shard_intermediate_size: int,
-    hidden_size: int,
-    topk: int,
-    dtype: torch.dtype,
-    use_fp8_w8a8: bool,
-    use_int8_w8a16: bool,
-    num_iters: int = 100,
-    block_quant_shape: List[int] = None,
-    best_time: float = float("inf"),
-    warmup_num_iters = 5
-) -> float:
+def benchmark_config(config: BenchmarkConfig,
+                     num_tokens: int,
+                     num_experts: int,
+                     shard_intermediate_size: int,
+                     hidden_size: int,
+                     topk: int,
+                     dtype: torch.dtype,
+                     use_fp8_w8a8: bool,
+                     use_int8_w8a16: bool,
+                     num_iters: int = 100,
+                     block_quant_shape: List[int] = None,
+                     best_time: float = float("inf"),
+                     warmup_num_iters=5) -> float:
     init_dtype = torch.float16 if use_fp8_w8a8 else dtype
     x = torch.randn(num_tokens, hidden_size, dtype=dtype)
     if use_int8_w8a16:
@@ -69,10 +68,22 @@ def benchmark_config(
                          shard_intermediate_size,
                          hidden_size,
                          dtype=init_dtype)
+
+        if use_fp8_w8a8:
+            w1 = w1.to(FP8_DTYPE)
+            gc.collect()
+            torch.cuda.empty_cache()
+
         w2 = torch.randn(num_experts,
                          hidden_size,
                          shard_intermediate_size // 2,
                          dtype=init_dtype)
+
+        if use_fp8_w8a8:
+            w2 = w2.to(FP8_DTYPE)
+            gc.collect()
+            torch.cuda.empty_cache()
+
     gating_output = torch.randn(num_iters,
                                 num_tokens,
                                 num_experts,
@@ -107,9 +118,6 @@ def benchmark_config(
 
         a1_scale = torch.randn(1, dtype=torch.float32)
         a2_scale = torch.randn(1, dtype=torch.float32)
-
-        w1 = w1.to(FP8_DTYPE)
-        w2 = w2.to(FP8_DTYPE)
 
     input_gating = torch.empty(num_tokens, num_experts, dtype=torch.float32)
 
@@ -428,7 +436,7 @@ class BenchmarkWorker:
                                                    shard_intermediate_size,
                                                    hidden_size, search_space,
                                                    is_fp16, topk)
-            random.shuffle(search_space)
+        random.shuffle(search_space)
 
         with torch.cuda.device(self.device_id) if current_platform.is_rocm(
         ) else nullcontext():
@@ -446,8 +454,7 @@ class BenchmarkWorker:
                         use_int8_w8a16,
                         num_iters=20,
                         block_quant_shape=block_quant_shape,
-                        best_time=best_time
-                    )
+                        best_time=best_time)
                 except triton.runtime.autotuner.OutOfResources:
                     # Some configurations may be invalid and fail to compile.
                     continue
