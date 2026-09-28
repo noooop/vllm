@@ -1,21 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import argparse
+import dataclasses
 import multiprocessing
 import os
 import signal
 from logging import Logger
 from multiprocessing import forkserver
 from string import Template
+from typing import Any
 
 from fastapi import FastAPI
 
 from vllm import EngineArgs, envs
-from vllm.entrypoints.serve.utils.api_utils import (
-    get_non_default_args,
-    redact_sensitive_args,
-)
 from vllm.logger import current_formatter_type, init_logger
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)
 
@@ -52,11 +51,6 @@ def log_version_and_model(lgr: Logger, version: str, model_name: str) -> None:
         message = logo_template.substitute(colors)
 
     lgr.info(message, version, model_name)
-
-
-def log_non_default_args(args: argparse.Namespace | EngineArgs):
-    non_default_args = get_non_default_args(args)
-    logger.info("non-default args: %s", redact_sensitive_args(non_default_args))
 
 
 def cli_env_setup():
@@ -136,3 +130,83 @@ def log_routes(app: FastAPI) -> None:
         if endpoint is not None:
             name = getattr(endpoint, "__name__", type(endpoint).__name__)
             logger.info("Route: %s, Endpoint: %s", path, name)
+
+
+def get_non_default_args(args: argparse.Namespace | EngineArgs) -> dict[str, Any]:
+    from vllm.entrypoints.launchers.cli_args import make_arg_parser
+
+    non_default_args = {}
+
+    # Handle Namespace
+    if isinstance(args, argparse.Namespace):
+        parser = make_arg_parser(FlexibleArgumentParser())
+        for arg, default in vars(parser.parse_args([])).items():
+            if default != getattr(args, arg):
+                non_default_args[arg] = getattr(args, arg)
+
+    # Handle EngineArgs instance
+    elif isinstance(args, EngineArgs):
+        default_args = EngineArgs(model=args.model)  # Create default instance
+        for field in dataclasses.fields(args):
+            current_val = getattr(args, field.name)
+            default_val = getattr(default_args, field.name)
+            if current_val != default_val:
+                non_default_args[field.name] = current_val
+        if default_args.model != EngineArgs.model:
+            non_default_args["model"] = default_args.model
+    else:
+        raise TypeError(
+            "Unsupported argument type. Must be Namespace or EngineArgs instance."
+        )
+
+    return non_default_args
+
+
+def _jsonify_arg_value(value: Any) -> Any:
+    if value is None or isinstance(value, bool | int | float | str):
+        return value
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {
+            key: _jsonify_arg_value(val)
+            for key, val in dataclasses.asdict(value).items()
+        }
+    if isinstance(value, dict):
+        return {str(key): _jsonify_arg_value(val) for key, val in value.items()}
+    if isinstance(value, tuple | list):
+        return [_jsonify_arg_value(item) for item in value]
+    if (model_dump := getattr(value, "model_dump", None)) is not None:
+        return _jsonify_arg_value(model_dump(mode="json"))
+    if (to_dict := getattr(value, "dict", None)) is not None:
+        return _jsonify_arg_value(to_dict())
+    return repr(value)
+
+
+def jsonify_non_default_args(
+    args: argparse.Namespace | EngineArgs,
+    *,
+    exclude: set[str] | None = None,
+) -> dict[str, Any]:
+    non_default_args = get_non_default_args(args)
+    if exclude is not None:
+        for key in exclude:
+            non_default_args.pop(key, None)
+
+    return {key: _jsonify_arg_value(value) for key, value in non_default_args.items()}
+
+
+# Fields whose values must never be logged verbatim.
+_SENSITIVE_ARG_FIELDS = frozenset({"api_key", "hf_token", "watermark_config"})
+
+
+def redact_sensitive_args(args: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of `args` with sensitive values redacted for logging."""
+    if not any(key in _SENSITIVE_ARG_FIELDS for key in args):
+        return args
+    return {
+        key: ("***" if key in _SENSITIVE_ARG_FIELDS else value)
+        for key, value in args.items()
+    }
+
+def log_non_default_args(args: argparse.Namespace | EngineArgs):
+    non_default_args = get_non_default_args(args)
+    logger.info("non-default args: %s", redact_sensitive_args(non_default_args))
