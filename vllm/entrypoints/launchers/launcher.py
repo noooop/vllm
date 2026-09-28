@@ -27,6 +27,7 @@ from .utils.constants import (
     H11_MAX_HEADER_COUNT_DEFAULT,
     H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
 )
+from .utils.listen import create_server_unix_socket, create_server_socket
 from .utils.setup_utils import log_non_default_args, log_version_and_model
 
 logger = init_logger(__name__)
@@ -201,30 +202,6 @@ def terminate_if_errored(server: uvicorn.Server, engine: EngineClient):
     engine_errored = engine.errored and not engine.is_running
     if not envs.VLLM_KEEP_ALIVE_ON_ENGINE_DEATH and engine_errored:
         server.should_exit = True
-
-
-def create_server_socket(
-    addr: tuple[str, int],
-    *,
-    reuse_port: bool,
-) -> socket.socket:
-    family = socket.AF_INET
-    if is_valid_ipv6_address(addr[0]):
-        family = socket.AF_INET6
-
-    sock = socket.socket(family=family, type=socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    if reuse_port:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-    sock.bind(addr)
-
-    return sock
-
-
-def create_server_unix_socket(path: str) -> socket.socket:
-    sock = socket.socket(family=socket.AF_UNIX, type=socket.SOCK_STREAM)
-    sock.bind(path)
-    return sock
 
 
 def validate_api_server_args(args):

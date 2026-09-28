@@ -13,8 +13,6 @@ import socket
 from vllm.logger import init_logger
 from vllm.utils.network_utils import find_process_using_port, is_valid_ipv6_address
 
-from ..launcher import create_server_socket, create_server_unix_socket
-
 logger = init_logger(__name__)
 
 
@@ -40,6 +38,30 @@ def cleanup_listen_socket(sock: socket.socket, uds_path: str | None = None) -> N
     if uds_path:
         with contextlib.suppress(FileNotFoundError, OSError):
             os.unlink(uds_path)
+
+
+def create_server_socket(
+    addr: tuple[str, int],
+    *,
+    reuse_port: bool,
+) -> socket.socket:
+    family = socket.AF_INET
+    if is_valid_ipv6_address(addr[0]):
+        family = socket.AF_INET6
+
+    sock = socket.socket(family=family, type=socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    if reuse_port:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    sock.bind(addr)
+
+    return sock
+
+
+def create_server_unix_socket(path: str) -> socket.socket:
+    sock = socket.socket(family=socket.AF_UNIX, type=socket.SOCK_STREAM)
+    sock.bind(path)
+    return sock
 
 
 def setup_listen_address(
