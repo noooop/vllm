@@ -199,7 +199,7 @@ async def run_server_worker(
 def main():
     import uvloop
 
-    from vllm.entrypoints.serve.utils.api_utils import cli_env_setup
+    from vllm.entrypoints.launchers.utils.setup_utils import cli_env_setup
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 
     from ..cli_args import (

@@ -311,7 +311,7 @@ def run_single_api_server(args: argparse.Namespace):
 
 def main():
     """CLI entrypoint: parse and validate args, then dispatch."""
-    from vllm.entrypoints.serve.utils.api_utils import cli_env_setup
+    from vllm.entrypoints.launchers.utils.setup_utils import cli_env_setup
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 
     from ..cli_args import (
