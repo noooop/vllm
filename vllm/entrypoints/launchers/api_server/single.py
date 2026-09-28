@@ -206,7 +206,6 @@ async def run_server(
     See the module docstring for the full step-by-step flow. All long-lived
     resources are registered on ``exit_stack`` and released in LIFO order.
     """
-
     # --- 1. Process-level setup (one-shot side effects) --------------------
     setup_interrupt_handler()
     set_ulimit()

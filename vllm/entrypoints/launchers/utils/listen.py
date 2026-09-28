@@ -46,7 +46,6 @@ def setup_listen_address(
     args: argparse.Namespace, *, reuse_port: bool
 ) -> tuple[str, socket.socket]:
     """Bind the HTTP listen socket and return ``(listen_address, sock)``."""
-
     # Bind before the engine starts to avoid race conditions with ray.
     # See https://github.com/vllm-project/vllm/issues/8204
     if args.uds:
