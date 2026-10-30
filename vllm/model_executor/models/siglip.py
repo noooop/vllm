@@ -24,11 +24,11 @@ from vllm.model_executor.layers.attention import (
     EncoderOnlyAttention,
     MMEncoderAttention,
 )
-from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.layernorm import LayerNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
+    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.pooler import DispatchPooler
@@ -102,6 +102,26 @@ def _get_vision_feature_select_strategy(
             f"No feature selection strategy is defined for "
             f"pooling_type: {pooling_type!r}"
         ) from None
+
+
+def _patchify(pixel_values: torch.Tensor, patch_size: int) -> torch.Tensor:
+    """Convert [B, C, H, W] -> [B, H/P, W/P, C*P*P].
+
+    The feature layout is (c, kh, kw) flattened, which matches
+    Conv2d.weight.reshape(D, C*P*P) and is required by the Conv -> Linear
+    weight transfer in ``SiglipVisionTransformer.load_weights``.
+    """
+    P = patch_size
+    B, C, H, W = pixel_values.shape
+    Gh, Gw = H // P, W // P
+    assert H == Gh * P and W == Gw * P, (
+        f"image size ({H}, {W}) must be divisible by patch size ({P})"
+    )
+
+    x = pixel_values.unfold(2, P, P).unfold(3, P, P)  # [B, C, Gh, Gw, P, P]
+    x = x.permute(0, 2, 3, 1, 4, 5)                    # [B, Gh, Gw, C, P, P]
+    x = x.reshape(B, Gh, Gw, C * P * P)                # [B, Gh, Gw, C*P*P]
+    return x
 
 
 class SiglipProcessingInfo(BaseProcessingInfo):
@@ -257,19 +277,30 @@ class SiglipEncoderInfo(VisionEncoderInfo[SiglipVisionConfig]):
 
 # Adapted from https://github.com/huggingface/transformers/blob/v4.57.3/src/transformers/models/siglip/modeling_siglip.py#L216
 class SiglipVisionEmbeddings(nn.Module):
-    def __init__(self, config: SiglipVisionConfig):
+    def __init__(
+        self,
+        config: SiglipVisionConfig,
+        quant_config: QuantizationConfig | None = None,
+        *,
+        prefix: str = "",
+    ):
         super().__init__()
         self.config = config
         self.embed_dim = config.hidden_size
         self.image_size = config.image_size
         self.patch_size = config.patch_size
+        self.num_channels = config.num_channels
 
-        self.patch_embedding = Conv2dLayer(
-            in_channels=config.num_channels,
-            out_channels=self.embed_dim,
-            kernel_size=self.patch_size,
-            stride=self.patch_size,
-            padding="valid",
+        # Linear equivalent of Conv2d(kernel=P, stride=P, padding=0).
+        # Input layout is pre-patchified [B, Gh, Gw, C*P*P].
+        self.patch_embedding = ReplicatedLinear(
+            input_size=self.num_channels * self.patch_size * self.patch_size,
+            output_size=self.embed_dim,
+            bias=True,
+            return_bias=False,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "patch_embedding"),
+            params_dtype=getattr(config, "torch_dtype", None),
         )
 
         self.num_patches = (self.image_size // self.patch_size) ** 2
@@ -317,10 +348,15 @@ class SiglipVisionEmbeddings(nn.Module):
     ) -> torch.Tensor:
         _, _, height, width = pixel_values.shape
         target_dtype = self.patch_embedding.weight.dtype
-        patch_embeds = self.patch_embedding(
-            pixel_values.to(dtype=target_dtype)
-        )  # shape = [*, width, grid, grid]
-        embeddings = patch_embeds.flatten(2).transpose(1, 2)
+        pixel_values = pixel_values.to(dtype=target_dtype)
+
+        # [B, C, H, W] -> [B, Gh, Gw, C*P*P]
+        patches = _patchify(pixel_values, self.patch_size)
+        B, Gh, Gw, _ = patches.shape
+
+        # [B, Gh, Gw, C*P*P] -> [B, Gh, Gw, D] -> [B, N, D]
+        embeddings, _ = self.patch_embedding(patches)
+        embeddings = embeddings.reshape(B, Gh * Gw, self.embed_dim)
 
         if interpolate_pos_encoding:
             embeddings += self.interpolate_pos_encoding(embeddings, height, width)
@@ -376,20 +412,12 @@ class SiglipAttention(nn.Module):
         )
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
 
-        if attn_cls == MMEncoderAttention:
-            self.attn = attn_cls(
-                self.num_heads_per_partition,
-                self.head_dim,
-                self.scale,
-                prefix=f"{prefix}.attn",
-            )
-        else:
-            self.attn = attn_cls(
-                self.num_heads_per_partition,
-                self.head_dim,
-                self.scale,
-                prefix=f"{prefix}.attn",
-            )
+        self.attn = attn_cls(
+            self.num_heads_per_partition,
+            self.head_dim,
+            self.scale,
+            prefix=f"{prefix}.attn",
+        )
 
     def forward(
         self,
@@ -665,7 +693,11 @@ class SiglipVisionTransformer(nn.Module):
         self.config = config
         embed_dim = config.hidden_size
 
-        self.embeddings = SiglipVisionEmbeddings(config)
+        self.embeddings = SiglipVisionEmbeddings(
+            config,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "embeddings"),
+        )
 
         self.encoder = SiglipEncoder(
             config,
@@ -797,6 +829,9 @@ class SiglipVisionTransformer(nn.Module):
                     int(name.split(".")[2]) >= layer_count
                 ):
                     continue
+                # Conv2d weight [D, C, P, P] -> Linear weight [D, C*P*P].
+                if name.endswith("embeddings.patch_embedding.weight") and w.dim() == 4:
+                    w = w.reshape(w.shape[0], -1)
                 yield name, w
 
         return loader.load_weights(_filter(weights), mapper=self.hf_to_vllm_mapper)
