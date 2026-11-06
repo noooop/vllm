@@ -50,6 +50,9 @@ from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import (
     fused_allreduce_gemma_rms_norm,
 )
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
+from vllm.model_executor.layers.fusion.norm.gemma_rms_norm import (
+    GemmaRMSNorm as Qwen3_5RMSNorm,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
     QwenGatedDeltaNetAttention,
@@ -106,7 +109,6 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
     sequence_parallel_chunk,
 )
-from vllm.model_executor.utils import set_weight_attrs
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.sequence import IntermediateTensors
@@ -115,34 +117,6 @@ from vllm.tokenizers.registry import cached_tokenizer_from_config
 from .ops.fused_gdn_gated_norm import fused_gdn_gated_rms_norm
 
 logger = init_logger(__name__)
-
-
-class Qwen3_5RMSNorm(nn.Module):
-    """Gemma-style RMS normalization backed by flashinfer kernels.
-
-    When ``residual`` is given, the fused add + norm runs in place and the
-    updated ``(x, residual)`` pair is returned.
-    """
-
-    def __init__(self, hidden_size: int, eps: float = 1e-6) -> None:
-        super().__init__()
-        self.weight = nn.Parameter(torch.zeros(hidden_size))
-        set_weight_attrs(self.weight, {"dummy_weight_value": 0.0})
-        self.variance_epsilon = eps
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        residual: torch.Tensor | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        from flashinfer.norm import gemma_fused_add_rmsnorm, gemma_rmsnorm
-
-        if residual is None:
-            return gemma_rmsnorm(x, self.weight, self.variance_epsilon)
-
-        # gemma_fused_add_rmsnorm mutates x and residual in place.
-        gemma_fused_add_rmsnorm(x, residual, self.weight, self.variance_epsilon)
-        return x, residual
 
 
 class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):

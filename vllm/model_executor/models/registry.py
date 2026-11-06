@@ -109,7 +109,7 @@ _TEXT_GENERATION_MODELS = {
     "FalconMambaForCausalLM": ("mamba", "MambaForCausalLM"),
     "FalconH1ForCausalLM": ("falcon_h1", "FalconH1ForCausalLM"),
     "FlintForCausalLM": ("vllm.models.flint", "FlintForCausalLM"),
-    "GemmaForCausalLM": ("gemma", "GemmaForCausalLM"),
+    "GemmaForCausalLM": ("vllm.models.gemma", "GemmaForCausalLM"),
     "Gemma2ForCausalLM": ("gemma2", "Gemma2ForCausalLM"),
     "Gemma3ForCausalLM": ("gemma3", "Gemma3ForCausalLM"),
     "Rnj1ForCausalLM": ("rnj1", "Rnj1ForCausalLM"),
